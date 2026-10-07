@@ -1,4 +1,4 @@
-"""Topic A - CP3: Sweep yaw/pitch/roll/translation, đo mismatch.
+"""Topic A - CP3: Sweep yaw, đo mismatch.
 
 Chạy:
     python src/perturb_experiment.py --data-root data/kitti_mini --frame 000011
@@ -12,12 +12,11 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from starter.datasets import load_frame
-from starter.projection import (perturb_extrinsic, project_velo_to_image,
-                                 velo_to_cam, cam_to_image)
+from starter.projection import perturb_extrinsic, project_velo_to_image
 
 
 def count_points_in_box(uv, box2d):
-    """Đếm số điểm rơi vào 2D box (x1, y1, x2, y2)."""
+    """Đếm số điểm rơi vào 1 box (x1, y1, x2, y2)."""
     if len(uv) == 0:
         return 0
     x1, y1, x2, y2 = box2d
@@ -26,27 +25,21 @@ def count_points_in_box(uv, box2d):
 
 
 def evaluate(calib, points, image_shape, labels):
-    """Chiếu điểm và đo 2 metric:
-      - pct_in_fov: % điểm nằm trong ảnh
-      - pct_in_2dbox: % điểm rơi vào 2D box của bất kỳ object nào
-    """
+    """Đo 2 metric: % điểm trong FOV, % điểm trong 2D box."""
     uv, depth, mask = project_velo_to_image(points, calib, image_shape)
     n_total = len(mask)
     n_in_fov = int(mask.sum())
     pct_in_fov = 100.0 * n_in_fov / max(n_total, 1)
 
-    # Đếm điểm rơi vào 2D box (union)
-    n_in_box = 0
-    for obj in labels:
-        n_in_box += count_points_in_box(uv, obj.bbox)
+    n_in_box = sum(count_points_in_box(uv, obj.bbox) for obj in labels)
     pct_in_2dbox = 100.0 * n_in_box / max(n_total, 1)
 
     return {
         "n_points": n_total,
         "n_in_fov": n_in_fov,
-        "pct_in_fov": pct_in_fov,
+        "pct_in_fov": round(pct_in_fov, 3),
         "n_in_2dbox": n_in_box,
-        "pct_in_2dbox": pct_in_2dbox,
+        "pct_in_2dbox": round(pct_in_2dbox, 3),
         "n_objects": len(labels),
     }
 
@@ -56,22 +49,42 @@ def main():
     ap.add_argument("--data-root", default="data/kitti_mini")
     ap.add_argument("--frame", default="000011")
     ap.add_argument("--out-csv", default="results/yaw_perturb_sweep.csv")
+    ap.add_argument("--perturb", choices=["yaw", "pitch", "roll", "tx", "ty", "tz"],
+                    default="yaw")
     args = ap.parse_args()
 
     fr = load_frame(args.data_root, args.frame)
-    print(f"Loaded {args.frame}: image={fr['image'].shape}, points={fr['points'].shape}, "
-          f"labels={len(fr['labels'])}")
+    print(f"Loaded {args.frame}: image={fr['image'].shape}, "
+          f"points={fr['points'].shape}, labels={len(fr['labels'])}")
 
-    # Các mức yaw cần sweep (độ)
-    yaw_levels = [0.0, 0.5, 1.0, 2.0, 3.0]
+    # Các mức perturb
+    if args.perturb == "yaw":
+        levels = [0.0, 0.5, 1.0, 2.0, 3.0]
+    elif args.perturb in ("pitch", "roll"):
+        levels = [0.0, 0.5, 1.0, 2.0, 3.0]
+    else:  # tx, ty, tz (mét)
+        levels = [0.0, 0.02, 0.05, 0.10]
+
     rows = []
-    for yaw in yaw_levels:
-        calib = perturb_extrinsic(fr["calib"], yaw_deg=yaw)
+    for v in levels:
+        if args.perturb == "yaw":
+            calib = perturb_extrinsic(fr["calib"], yaw_deg=v)
+        elif args.perturb == "pitch":
+            calib = perturb_extrinsic(fr["calib"], pitch_deg=v)
+        elif args.perturb == "roll":
+            calib = perturb_extrinsic(fr["calib"], roll_deg=v)
+        elif args.perturb == "tx":
+            calib = perturb_extrinsic(fr["calib"], t_xyz_m=(v, 0, 0))
+        elif args.perturb == "ty":
+            calib = perturb_extrinsic(fr["calib"], t_xyz_m=(0, v, 0))
+        elif args.perturb == "tz":
+            calib = perturb_extrinsic(fr["calib"], t_xyz_m=(0, 0, v))
+
         m = evaluate(calib, fr["points"], fr["image"].shape, fr["labels"])
-        row = {"perturb_type": "yaw", "perturb_value": yaw, **m}
+        row = {"perturb_type": args.perturb, "perturb_value": v, **m}
         rows.append(row)
-        print(f"yaw={yaw:>4.1f}° | in_fov={m['pct_in_fov']:>5.2f}% | "
-              f"in_2dbox={m['pct_in_2dbox']:>5.2f}% | points_in_box={m['n_in_2dbox']}")
+        print(f"{args.perturb}={v:>5.2f} | in_fov={m['pct_in_fov']:>6.2f}% | "
+              f"in_2dbox={m['pct_in_2dbox']:>6.2f}% | n_in_box={m['n_in_2dbox']}")
 
     # Ghi CSV
     out = Path(args.out_csv)
